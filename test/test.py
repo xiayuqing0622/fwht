@@ -96,3 +96,5 @@ def test_fwht_4096_f16():
     expected = _reference_fwht(a.clone())
     actual = fast_hadamard_transform(a, scale)
     assert torch.allclose(expected, actual, atol=1 * scale)
+
+test_fwht_8192_scale()
