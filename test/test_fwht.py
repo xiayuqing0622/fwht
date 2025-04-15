@@ -5,7 +5,7 @@ import math
 import torch
 import torch.nn.functional as F
 import pytest
-
+import time
 from einops import rearrange, repeat
 
 # from fast_hadamard_transform.fast_hadamard_transform_interface import hadamard_transform, hadamard_transform_ref
@@ -36,7 +36,7 @@ def hadamard_transform_ref(x, scale=1.0):
 # @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 # @pytest.mark.parametrize("dim", [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 137, 1024, 2048, 4096, 8192, 16384, 32768])
-@pytest.mark.parametrize("dim", [16, 32, 64, 128, 256, 512, 137, 1024, 2048, 4096, 8192])#, 16384, 32768])
+@pytest.mark.parametrize("dim", [16, 32, 64, 128, 256, 512, 137, 1024, 2048, 4096, 8192, 16384, 32768])
 # @pytest.mark.parametrize("dim", [256])
 def test_fast_hadamard_transform(dim, dtype):
     device = "cuda"
@@ -62,11 +62,11 @@ def test_fast_hadamard_transform(dim, dtype):
     print(f"Output Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
     assert (out - out_ref).abs().max().item() < 2 * (out_pt - out_ref).abs().max() + atol
 
-    # g = torch.randn_like(out)
-    # out.backward(g)
-    # out_ref.backward(g)
-    # out_pt.backward(g)
+    g = torch.randn_like(out)
+    out.backward(g)
+    out_ref.backward(g)
+    out_pt.backward(g)
 
-    # print(f"dx max diff: {(x.grad - x_ref.grad).abs().max().item()}")
-    # print(f"dx Pytorch max diff: {(x_pt.grad - x_ref.grad).abs().max().item()}")
-    # assert (x.grad - x_ref.grad).abs().max().item() < 2 * (x_pt.grad - x_ref.grad).abs().max() + atol
+    print(f"dx max diff: {(x.grad - x_ref.grad).abs().max().item()}")
+    print(f"dx Pytorch max diff: {(x_pt.grad - x_ref.grad).abs().max().item()}")
+    assert (x.grad - x_ref.grad).abs().max().item() < 2 * (x_pt.grad - x_ref.grad).abs().max() + atol

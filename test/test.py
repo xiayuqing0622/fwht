@@ -1,100 +1,84 @@
+# Copyright (C) 2023, Tri Dao.
+
 import math
-from functools import partial
 
-import einops
 import torch
+import torch.nn.functional as F
+import pytest
 
-from fwht import fast_hadamard_transform
-from fwht._hadamard import (
-    _reference_fwht,
-    hadamard
-)
+from einops import rearrange, repeat
+import time
+# from fast_hadamard_transform.fast_hadamard_transform_interface import hadamard_transform, hadamard_transform_ref
+from fwht import fast_hadamard_transform as fwht_fast_hadamard_transform
+from fast_hadamard_transform import hadamard_transform # pip install fast_hadamard_transform
+try:
+    from scipy.linalg import hadamard
+except ImportError:
+    hadamard = None
+def hadamard_transform_ref(x, scale=1.0):
+    """
+    x: (..., dim)
+    out: (..., dim)
+    """
+    if hadamard is None:
+        raise ImportError("Please install scipy")
+    x_shape = x.shape
+    dim = x.shape[-1]
+    x = x.reshape(-1, dim)
+    log_dim = math.ceil(math.log2(dim))
+    dim_padded = 2 ** log_dim
+    if dim != dim_padded:
+        x = F.pad(x, (0, dim_padded - dim))
+    out = F.linear(x, torch.tensor(hadamard(dim_padded, dtype=float), dtype=x.dtype, device=x.device))
+    out = out * scale
+    return out[..., :dim].reshape(*x_shape)
 
-DEVICE = 'cuda'
+# # @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+# @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+# # @pytest.mark.parametrize("dim", [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 137, 1024, 2048, 4096, 8192, 16384, 32768])
+# # @pytest.mark.parametrize("dim", [16, 32, 64, 128, 256, 512, 137, 1024, 2048, 4096, 8192])#, 16384, 32768])
+# @pytest.mark.parametrize("dim", [4096])
+def test_fast_hadamard_transform(dim, dtype):
+    device = "cuda"
+    rtol, atol = (3e-4, 3e-3) if dtype == torch.float32 else (3e-3, 5e-3)
+    if dtype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 15
+    # batch_size = 1
+    x = torch.randn(batch_size, dim, device=device, dtype=dtype).requires_grad_()
+    x_ref = x.detach().clone().requires_grad_()
+    x_pt = x.detach().clone().requires_grad_()
+    scale = 1 / math.sqrt(dim)
+    torch.cuda.synchronize()
+    start = time.time()
+    for _ in range(1000):
+        out = hadamard_transform(x, scale=scale)
+        # out = fwht_fast_hadamard_transform(x, scale=scale)
+    torch.cuda.synchronize()
+    print(f"Time: {(time.time() - start):.4f} ms")
+    out_ref = hadamard_transform_ref(x_ref.float(), scale=scale)
+    out_pt = hadamard_transform_ref(x_pt, scale=scale)
 
-def rand_ones(size, device):
-    zeros = torch.zeros(size, device=device)
-    nonzero = size[1] // 3
-    indices = torch.randint(0, size[1] - 1, (nonzero,), device=device)
-    zeros[:, indices] = 1
-    return zeros
+    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
+    print(f"Output Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
+    print(f"Output Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
+    assert (out - out_ref).abs().max().item() < 2 * (out_pt - out_ref).abs().max() + atol
 
-_INPUT_GENERATORS = [
-    (partial(torch.ones, device=DEVICE), 1e-3),
-    (lambda size: -torch.ones(size, device=DEVICE), 1e-3),
-    (partial(torch.randn, device=DEVICE), 1),
-    (partial(rand_ones, device=DEVICE), 1e-3)
-]
+    g = torch.randn_like(out)
+    torch.cuda.synchronize()
+    start = time.time()
+    for _ in range(1000):
+        out.backward(g)
+    torch.cuda.synchronize()
+    print(f"Backward Time: {(time.time() - start):.4f} ms")
+    # out.backward(g)
+    out_ref.backward(g)
+    out_pt.backward(g)
 
-_SCALE_GENERATORS = [
-    lambda _: 1.0,
-    lambda size: 1 / size,
-    lambda size: 1 / (2 ** (size - 1))
-]
-
-def test_reference_orthogonal():
-    for size in [8, 16, 32, 64]:
-        a = torch.eye(size, dtype=torch.float32, device=DEVICE)
-        H = hadamard(size, DEVICE).float()
-        assert torch.allclose(H @ H.T, a * size) 
-
-def fwht_wrapper(size):
-    for gen, atol in _INPUT_GENERATORS:
-        for scale_gen in _SCALE_GENERATORS:
-            a = gen((8, size)).float()
-            scale = scale_gen(size)
-            H = hadamard(size, DEVICE)
-            expected1 = einops.einsum(H, a.double(), 'r c, b c -> b r').float() * scale
-            expected2 = _reference_fwht(a.clone(), scale=scale)
-            actual = fast_hadamard_transform(a, scale)
-            assert torch.allclose(expected1, actual, atol=atol * scale)
-            assert torch.allclose(expected2, actual, atol=atol * scale)
-
-def test_fwht_32():
-    fwht_wrapper(32)
-
-def test_fwht_128():
-    fwht_wrapper(128)
-
-def test_fwht_256():
-    fwht_wrapper(256)
-
-def test_fwht_512():
-    fwht_wrapper(512)
-
-def test_fwht_1024():
-    fwht_wrapper(1024)
-    
-def test_fwht_2048():
-    fwht_wrapper(2048)
-
-def test_fwht_4096():
-    fwht_wrapper(4096)
-    
-def test_fwht_8192_scale():
-    fwht_wrapper(8192)
-    
-def right_zero_pad(a, size):
-    zeros = torch.zeros(a.size(0), size, device=DEVICE)
-    zeros[:, :a.size(1)] = a
-    return zeros
-
-    
-def test_fwht_276_implicit_pad():
-    size = 272
-    H = hadamard(512, DEVICE)
-    a = torch.ones((2, size), device=DEVICE)
-    expected1 = einops.einsum(
-        H, right_zero_pad(a.clone(), 512).double(), 'r c, b c -> b r').float()
-    actual = fast_hadamard_transform(a)
-    assert torch.allclose(expected1[:, :size], actual, atol=1e-3)
-
-def test_fwht_4096_f16():
-    size = 4096
-    scale = 1
-    a = torch.randn(8, size, device=DEVICE, dtype=torch.float16)
-    expected = _reference_fwht(a.clone())
-    actual = fast_hadamard_transform(a, scale)
-    assert torch.allclose(expected, actual, atol=1 * scale)
-
-test_fwht_8192_scale()
+    print(f"dx max diff: {(x.grad - x_ref.grad).abs().max().item()}")
+    print(f"dx Pytorch max diff: {(x_pt.grad - x_ref.grad).abs().max().item()}")
+    assert (x.grad - x_ref.grad).abs().max().item() < 2 * (x_pt.grad - x_ref.grad).abs().max() + atol
+test_fast_hadamard_transform(4096, torch.float16)
